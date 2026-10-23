@@ -1,0 +1,38 @@
+# STM32CubeIDE
+**/Debug/
+**/Release/
+**/.metadata/
+
+# Archivos de compilacion
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.su
+
+# Archivos temporales
+*.tmp
+*.bak
+*.swp
+*~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+
+# Credenciales
+.env
+.env.*
+!.env.example
+secrets.h
