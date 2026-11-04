@@ -50,6 +50,7 @@ typedef struct
 #define ADC_MAXIMO                4095U
 #define LUZ_PARA_LIBERAR_PCT       60U
 #define LUZ_PARA_OCUPAR_PCT        40U
+#define I2C_DIRECCION_7BIT          0x10U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -58,6 +59,8 @@ typedef struct
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+
+I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
 static Parqueo_t parqueos[NUM_PARQUEOS_LOCALES];
@@ -68,6 +71,15 @@ volatile uint16_t lecturas_ldr[NUM_PARQUEOS_LOCALES];
 volatile uint8_t luminosidad_pct[NUM_PARQUEOS_LOCALES];
 volatile uint8_t lectura_adc_valida;
 volatile uint32_t errores_adc;
+
+/* Main publica un byte atomico; la ISR conserva su propia copia estable. */
+static volatile uint8_t ocupacion_publicada;
+static uint8_t i2c_tx;
+static uint8_t i2c_rx_descartado[2]; /* Segundo byte: margen del driver F4 en error. */
+static volatile uint8_t i2c_recuperar;
+volatile uint32_t i2c_ultimo_error;
+volatile uint32_t i2c_errores;
+volatile uint32_t i2c_lecturas;
 
 /* Divisor: 3.3 V -> resistencia fija -> ADC -> LDR -> GND.
  * Referencias iniciales de escala completa, no mediciones calibradas.
@@ -91,8 +103,11 @@ static const uint8_t tabla_7segmentos[9] =
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 static void Parqueos_Init(void);
+static void I2C_Servicio(void);
+static void I2C_PedirRecuperacion(void);
 static void Parqueos_ProcesarLdr(void);
 static void Parqueos_ActualizarFSM(void);
 static void Parqueos_CalcularDisponibles(void);
@@ -267,10 +282,17 @@ static void Parqueos_ActualizarFSM(void)
 static void Parqueos_CalcularDisponibles(void)
 {
     uint8_t ocupados = 0U;
+    uint8_t mascara = 0U;
     for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
     {
-        if (parqueos[sensor].estado == ESTADO_OCUPADO) { ++ocupados; }
+        if (parqueos[sensor].estado == ESTADO_OCUPADO)
+        {
+            ++ocupados;
+            mascara |= (uint8_t)(1U << sensor);
+        }
     }
+    ocupacion_publicada = mascara; /* Una sola escritura, despues de toda la FSM. */
+    /* PROVISIONAL: supone libres los cuatro del grupo B; no es total global. */
     uint8_t nuevo_total = NUM_PARQUEOS_TOTALES - ocupados;
     if (nuevo_total != espacios_disponibles)
     {
@@ -374,12 +396,17 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   HAL_NVIC_DisableIRQ(EXTI3_IRQn);
   Parqueos_Init();
   Display_MostrarNumero(espacios_disponibles);
   actualizar_display = 0U;
-/* USER CODE END 2 */
+  if (HAL_I2C_EnableListen_IT(&hi2c1) != HAL_OK)
+  {
+      I2C_PedirRecuperacion();
+  }
+  /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -388,6 +415,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    I2C_Servicio();
     Parqueos_ProcesarLdr();
     Parqueos_ActualizarFSM();
     if (actualizar_display != 0U)
@@ -396,7 +424,7 @@ int main(void)
         actualizar_display = 0U;
     }
   }
-/* USER CODE END 3 */
+  /* USER CODE END 3 */
 }
 
 /**
@@ -472,7 +500,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ScanConvMode = ENABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = ENABLE;
-  hadc1.Init.NbrOfDiscConversion = 1U;
+  hadc1.Init.NbrOfDiscConversion = 1;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
@@ -486,7 +514,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_0; /* LDR 1: PA0 */
+  sConfig.Channel = ADC_CHANNEL_0;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
@@ -496,7 +524,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_1; /* LDR 2: PA1 */
+  sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = 2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -505,7 +533,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_13; /* LDR 3: PC3 */
+  sConfig.Channel = ADC_CHANNEL_4;
   sConfig.Rank = 3;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -514,15 +542,49 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_14; /* LDR 4: PC4 */
+  sConfig.Channel = ADC_CHANNEL_8;
   sConfig.Rank = 4;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-  /* Secuencia PA0, PA1, PC3, PC4: un rank por disparo, sin DMA. */
+
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 32;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
 
 }
 
@@ -604,6 +666,75 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+static void I2C_PedirRecuperacion(void)
+{
+    i2c_recuperar = 1U;
+    __HAL_I2C_DISABLE_IT(&hi2c1, I2C_IT_EVT | I2C_IT_BUF | I2C_IT_ERR);
+    __HAL_I2C_DISABLE(&hi2c1);
+}
+
+static void I2C_Servicio(void)
+{
+    static uint32_t ultimo_intento;
+    if (i2c_recuperar == 0U ||
+        (uint32_t)(HAL_GetTick() - ultimo_intento) < 10U) { return; }
+    ultimo_intento = HAL_GetTick();
+
+    /* Recuperacion fuera de ISR. HAL F4 Init/DeInit no esperan al maestro.
+     * Seccion acotada: impide carreras con EV/ER y restaura PRIMASK. */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    HAL_StatusTypeDef resultado = HAL_I2C_DeInit(&hi2c1);
+    __HAL_RCC_I2C1_FORCE_RESET();
+    __HAL_RCC_I2C1_RELEASE_RESET();
+    HAL_NVIC_ClearPendingIRQ(I2C1_EV_IRQn);
+    HAL_NVIC_ClearPendingIRQ(I2C1_ER_IRQn);
+    if (resultado == HAL_OK) { resultado = HAL_I2C_Init(&hi2c1); }
+    if (resultado == HAL_OK) { resultado = HAL_I2C_EnableListen_IT(&hi2c1); }
+    if (resultado == HAL_OK) { i2c_recuperar = 0U; }
+    else { I2C_PedirRecuperacion(); }
+    __set_PRIMASK(primask);
+}
+
+void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c,
+                          uint8_t TransferDirection, uint16_t AddrMatchCode)
+{
+    (void)AddrMatchCode;
+    if (hi2c->Instance != I2C1 || i2c_recuperar != 0U) { return; }
+    HAL_StatusTypeDef resultado;
+    /* RECEIVE describe al MAESTRO: requestFrom lee, el esclavo transmite. */
+    if (TransferDirection == I2C_DIRECTION_RECEIVE)
+    {
+        i2c_tx = ocupacion_publicada;
+        resultado = HAL_I2C_Slave_Seq_Transmit_IT(
+            hi2c, &i2c_tx, 1U, I2C_FIRST_AND_LAST_FRAME);
+        if (resultado == HAL_OK) { ++i2c_lecturas; }
+    }
+    else
+    {
+        /* Tolerar una escritura de un byte, descartandola. No es total global.
+         * Un escaneo con STOP sin datos puede provocar AF y recuperacion. */
+        resultado = HAL_I2C_Slave_Seq_Receive_IT(
+            hi2c, i2c_rx_descartado, 1U, I2C_FIRST_AND_LAST_FRAME);
+    }
+    if (resultado != HAL_OK) { I2C_PedirRecuperacion(); }
+}
+
+void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c->Instance != I2C1 || i2c_recuperar != 0U) { return; }
+    if (HAL_I2C_EnableListen_IT(hi2c) != HAL_OK) { I2C_PedirRecuperacion(); }
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c->Instance != I2C1) { return; }
+    i2c_ultimo_error = HAL_I2C_GetError(hi2c);
+    ++i2c_errores;
+    /* No rearmar aqui: I2C_ITError de F4 aun modifica interrupciones al salir.
+     * El NACK normal tras leer un byte va a ListenCplt en esta HAL. */
+    I2C_PedirRecuperacion();
+}
 
 /* USER CODE END 4 */
 
