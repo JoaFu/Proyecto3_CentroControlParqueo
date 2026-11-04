@@ -67,7 +67,7 @@ static uint32_t ultima_lectura_ms;
 volatile uint16_t lecturas_ldr[NUM_PARQUEOS_LOCALES];
 volatile uint8_t luminosidad_pct[NUM_PARQUEOS_LOCALES];
 volatile uint8_t lectura_adc_valida;
-volatile uint32_t errores_adc;
+
 
 /* Divisor: 3.3 V -> resistencia fija -> ADC -> LDR -> GND.
  * Referencias iniciales de escala completa, no mediciones calibradas.
@@ -137,13 +137,17 @@ static HAL_StatusTypeDef ADC_LeerLdr(uint16_t valores[])
         for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
         {
             resultado = HAL_ADC_Start(&hadc1);
+
             if (resultado != HAL_OK) { goto finalizar; }
+
             if (HAL_ADC_GetError(&hadc1) != HAL_ADC_ERROR_NONE)
             {
                 resultado = HAL_ERROR;
                 goto finalizar;
             }
+
             resultado = HAL_ADC_PollForConversion(&hadc1, ADC_TIMEOUT_MS);
+
             if (resultado != HAL_OK) { goto finalizar; }
             if (__HAL_ADC_GET_FLAG(&hadc1, ADC_FLAG_OVR) != RESET)
             {
@@ -164,6 +168,8 @@ static HAL_StatusTypeDef ADC_LeerLdr(uint16_t valores[])
             Error_Handler();
         }
     }
+
+    // Estructura repetida varias veces, para barrer sensores
     for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
     {
         valores[sensor] = (uint16_t)((sumas[sensor] + MUESTRAS_PROMEDIO / 2U)
@@ -183,47 +189,65 @@ finalizar:
 static void Parqueos_ProcesarLdr(void)
 {
     uint32_t ahora = HAL_GetTick();
+    //Si todavía no han pasado los 20ms, salir de Parqueos_ProcesarLdr()
     if ((uint32_t)(ahora - ultima_lectura_ms) < PERIODO_LECTURA_MS) { return; }
+
     ultima_lectura_ms = ahora;
     uint16_t valores[NUM_PARQUEOS_LOCALES];
-
+    // Salir si HAL_OK = FALSE
     if (ADC_LeerLdr(valores) != HAL_OK)
     {
         lectura_adc_valida = 0U;
-        if (errores_adc < UINT32_MAX) { ++errores_adc; }
         for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
         {
             parqueos[sensor].cambio_pendiente = 0U;
         }
         return; /* Conservar el ultimo numero y reintentar la lectura. */
     }
+    //......................................................................
+    //Código de procesamiento
+    //......................................................................
     lectura_adc_valida = 1U;
     ahora = HAL_GetTick();
 
     for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
     {
-        const ConfiguracionLdr_t *config = &configuracion_ldr[sensor];
-        Parqueo_t *parqueo = &parqueos[sensor];
-        lecturas_ldr[sensor] = valores[sensor];
+        // Crea dos punteros referenciando datos existentes
+    	//----------------------------------------------------------------
+    	//Apunta a la config. del sensor actual
+    	const ConfiguracionLdr_t *config = &configuracion_ldr[sensor];
+        //Apunta a los datos del parqueo correspondiente
+    	Parqueo_t *parqueo = &parqueos[sensor];
+    	//----------------------------------------------------------------
+
+        lecturas_ldr[sensor] = valores[sensor]; //Guardar lectura
+
+        // Mapeo de lectura a porcentaje tal que 100%=adc_con_luz
         int32_t luz = (100 * ((int32_t)valores[sensor] - config->adc_sin_luz))
                     / ((int32_t)config->adc_con_luz - config->adc_sin_luz);
+
+        //Protección
         if (luz < 0) { luz = 0; }
         if (luz > 100) { luz = 100; }
-        luminosidad_pct[sensor] = (uint8_t)luz;
 
+        luminosidad_pct[sensor] = (uint8_t)luz;
         uint8_t ocupado;
-        if (luz >= config->luz_para_liberar_pct) { ocupado = 0U; }
-        else if (luz <= config->luz_para_ocupar_pct) { ocupado = 1U; }
+
+        if (luz >= config->luz_para_liberar_pct) { ocupado = 0U; } //Libre
+
+        else if (luz <= config->luz_para_ocupar_pct) { ocupado = 1U; } // Ocupado
+
         else
         {
             parqueo->cambio_pendiente = 0U;
             continue;
-        }
+        } // Si no es libre ni ocupado, entonces no hay lectura adecuada
 
         if (ocupado == parqueo->flag_ocupado)
         {
             parqueo->cambio_pendiente = 0U;
-        }
+        } // Si la ocupación confirmada es igual entonces no hay que confirmar cambios
+
         else if (parqueo->cambio_pendiente == 0U ||
                  ocupado != parqueo->candidato_ocupado)
         {
@@ -231,6 +255,7 @@ static void Parqueos_ProcesarLdr(void)
             parqueo->inicio_cambio_ms = ahora;
             parqueo->cambio_pendiente = 1U;
         }
+
         else if ((uint32_t)(ahora - parqueo->inicio_cambio_ms)
                  >= CONFIRMACION_CAMBIO_MS)
         {
