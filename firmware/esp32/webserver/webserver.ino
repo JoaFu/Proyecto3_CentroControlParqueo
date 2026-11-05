@@ -1,4 +1,3 @@
-
 /*
  * PROYECTO 3 - CENTRO DE CONTROL PARA PARQUEO
  * ESP32: Maestro I2C y servidor web HTTP
@@ -15,6 +14,7 @@
  * IMPORTANTE:
  *   Las STM32 deben implementar este protocolo.
  *   La STM32 B puede permanecer desconectada.
+
  */
 
 #include <WiFi.h>
@@ -25,8 +25,8 @@
 // 1. CONFIGURACION DE RED
 // ==================================================
 
-const char* ssid = "TIGO-DFCE";
-const char* password = "2NJ555303874";
+const char* ssid = "Enrique";
+const char* password = "12071207Ee";
 
 WebServer server(80);
 
@@ -79,106 +79,464 @@ uint32_t ultimaLecturaI2C = 0;
 // 4. INTERFAZ WEB
 // ==================================================
 
-// Puedes reemplazar este HTML por tu interfaz
-// final. La ruta /estado conserva el mismo JSON.
-
 const char PAGINA[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport"
-        content="width=device-width, initial-scale=1">
+        content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#F5F5F7">
   <title>Parqueo-matic</title>
 
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      max-width: 700px;
-      margin: 30px auto;
-      padding: 15px;
+    :root {
+      --fondo: #F5F5F7;
+      --texto: #1D1D1F;
+      --texto-2: #86868B;
+      --acento: #0066CC;
+      --vidrio: rgba(255, 255, 255, 0.72);
+      --borde: rgba(0, 0, 0, 0.06);
+      --sombra: 0 1px 2px rgba(0, 0, 0, 0.04),
+                0 8px 24px rgba(0, 0, 0, 0.04);
+
+      /* Escala tipografica: 3 tamanos */
+      --t-titulo: 28px;
+      --t-cuerpo: 15px;
+      --t-micro: 12px;
     }
 
+    * { box-sizing: border-box; margin: 0; }
+
+    body {
+      background: var(--fondo);
+      color: var(--texto);
+      font-family: -apple-system, BlinkMacSystemFont,
+                   "SF Pro Text", "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, sans-serif;
+      font-size: var(--t-cuerpo);
+      font-weight: 400;
+      line-height: 1.47;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ---------- Encabezado de vidrio ---------- */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: var(--vidrio);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 1px solid var(--borde);
+    }
+
+    .barra {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .marca {
+      font-size: var(--t-cuerpo);
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .estado {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: var(--t-micro);
+      color: var(--texto-2);
+    }
+
+    /* ---------- Layout ---------- */
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 48px 24px 64px;
+      display: flex;
+      flex-direction: column;
+      gap: 48px;
+    }
+
+    h1, h2 {
+      font-weight: 600;
+      letter-spacing: -0.022em;
+    }
+
+    h1 { font-size: var(--t-titulo); line-height: 1.14; }
+    h2 { font-size: var(--t-cuerpo); letter-spacing: -0.01em; }
+
+    .micro {
+      font-size: var(--t-micro);
+      color: var(--texto-2);
+    }
+
+    /* ---------- Tarjetas de vidrio ---------- */
+    .tarjeta {
+      background: var(--vidrio);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      backdrop-filter: saturate(180%) blur(20px);
+      border: 1px solid var(--borde);
+      border-radius: 20px;
+      box-shadow: var(--sombra);
+      padding: 24px;
+    }
+
+    /* ---------- Resumen ---------- */
+    .resumen {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .cifra {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+
+    .cifra .valor {
+      font-size: var(--t-titulo);
+      font-weight: 600;
+      letter-spacing: -0.022em;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .barra-ocupacion {
+      display: flex;
+      gap: 4px;
+    }
+
+    .barra-ocupacion span {
+      flex: 1;
+      height: 4px;
+      border-radius: 2px;
+      background: rgba(0, 0, 0, 0.08);
+      transition: background 0.4s ease;
+    }
+
+    .barra-ocupacion span.libre   { background: var(--acento); }
+    .barra-ocupacion span.ocupado { background: var(--texto); }
+
+    /* ---------- Grupos ---------- */
     .grupo {
-      margin: 25px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .grupo-cabecera {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .grupo-cabecera div {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .comm {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: var(--t-micro);
+      color: var(--texto-2);
     }
 
     .fila {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 10px;
+      gap: 16px;
     }
 
+    /* ---------- Parqueo ---------- */
     .parqueo {
-      padding: 20px 5px;
-      background: #dddddd;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      padding: 16px;
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.9);
+      border: 1px solid var(--borde);
+      transition: background 0.3s ease,
+                  color 0.3s ease,
+                  border-color 0.3s ease;
+    }
+
+    .parqueo .num {
+      font-size: var(--t-cuerpo);
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .parqueo .est {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: var(--t-micro);
+      color: var(--texto-2);
+    }
+
+    .parqueo.libre {
+      border-color: rgba(0, 102, 204, 0.35);
+    }
+    .parqueo.libre .num,
+    .parqueo.libre .est { color: var(--acento); }
+
+    .parqueo.ocupado {
+      background: var(--texto);
+      border-color: var(--texto);
+      color: #FFFFFF;
+    }
+    .parqueo.ocupado .est { color: rgba(255, 255, 255, 0.64); }
+
+    .parqueo.nodato {
+      background: transparent;
+      border-style: dashed;
+    }
+    .parqueo.nodato .num { color: var(--texto-2); }
+
+    /* ---------- Puntos de estado ---------- */
+    .punto {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--texto-2);
+      flex: none;
+    }
+    .punto.on    { background: var(--acento); }
+    .punto.libre { background: var(--acento); }
+    .punto.ocup  { background: rgba(255, 255, 255, 0.64); }
+
+    /* ---------- Historial ---------- */
+    .eventos {
+      list-style: none;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .eventos li {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--borde);
+    }
+    .eventos li:first-child { padding-top: 0; }
+    .eventos li:last-child  { border-bottom: 0; padding-bottom: 0; }
+
+    .eventos .hora {
+      font-size: var(--t-micro);
+      color: var(--texto-2);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .eventos .nuevo { color: var(--acento); }
+
+    .vacio { color: var(--texto-2); }
+
+    footer {
       text-align: center;
-      border-radius: 8px;
+      font-size: var(--t-micro);
+      color: var(--texto-2);
     }
 
-    .libre {
-      background: #b9edc7;
+    @media (max-width: 520px) {
+      main { padding-top: 32px; gap: 32px; }
+      .tarjeta { padding: 16px; border-radius: 16px; }
+      .fila { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+      .parqueo { gap: 16px; }
     }
 
-    .ocupado {
-      background: #ffbaba;
-    }
-
-    .contador {
-      font-size: 24px;
-      font-weight: bold;
-    }
-
-    @media (max-width: 480px) {
-      .fila {
-        grid-template-columns: repeat(2, 1fr);
-      }
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; }
     }
   </style>
 </head>
 
 <body>
 
-  <h1>Parqueo-matic</h1>
-  <p>Centro de control de parqueo</p>
+  <header>
+    <div class="barra">
+      <span class="marca">Parqueo-matic</span>
+      <span class="estado">
+        <span class="punto" id="puntoConexion"></span>
+        <span id="conexion">Conectando...</span>
+      </span>
+    </div>
+  </header>
 
-  <p id="conexion">Conectando...</p>
+  <main>
 
-  <p class="contador">
-    Disponibles: <span id="disponibles">--</span>
-    de 8
-  </p>
+    <section>
+      <h1>Centro de control<br>de parqueo</h1>
+    </section>
 
-  <div class="grupo">
-    <h2>Grupo A - P1 a P4</h2>
-    <p id="grupoA">Sin comunicacion</p>
-    <div class="fila" id="filaA"></div>
-  </div>
+    <section class="tarjeta resumen">
+      <div>
+        <p class="micro">Disponibles ahora</p>
+        <p class="cifra">
+          <span class="valor" id="disponibles">--</span>
+          <span class="micro">de 8 espacios</span>
+        </p>
+      </div>
+      <div class="barra-ocupacion" id="barra"></div>
+    </section>
 
-  <div class="grupo">
-    <h2>Grupo B - P5 a P8</h2>
-    <p id="grupoB">Sin comunicacion</p>
-    <div class="fila" id="filaB"></div>
-  </div>
+    <section class="grupo">
+      <div class="grupo-cabecera">
+        <div>
+          <h2>Grupo A</h2>
+          <span class="micro">P1 a P4</span>
+        </div>
+        <span class="comm">
+          <span class="punto" id="puntoA"></span>
+          <span id="grupoA">Sin comunicaci&oacute;n</span>
+        </span>
+      </div>
+      <div class="fila" id="filaA"></div>
+    </section>
 
-  <h2>Ultimos cambios</h2>
-  <ul id="eventos"></ul>
+    <section class="grupo">
+      <div class="grupo-cabecera">
+        <div>
+          <h2>Grupo B</h2>
+          <span class="micro">P5 a P8</span>
+        </div>
+        <span class="comm">
+          <span class="punto" id="puntoB"></span>
+          <span id="grupoB">Sin comunicaci&oacute;n</span>
+        </span>
+      </div>
+      <div class="fila" id="filaB"></div>
+    </section>
+
+    <section class="grupo">
+      <h2>&Uacute;ltimos cambios</h2>
+      <div class="tarjeta">
+        <ul class="eventos" id="eventos">
+          <li class="vacio" id="vacio">
+            Sin cambios registrados
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <footer>
+      Actualizaci&oacute;n autom&aacute;tica cada segundo
+    </footer>
+
+  </main>
 
   <script>
     // Estado anterior de cada espacio.
     let anteriores = Array(8).fill(null);
 
+    // Utilidad: crear elemento con clase y texto.
+    function el(tag, clase, texto) {
+      const e = document.createElement(tag);
+      if (clase) e.className = clase;
+      if (texto !== undefined) e.textContent = texto;
+      return e;
+    }
+
     // Crear los indicadores una sola vez.
     for (let i = 0; i < 8; i++) {
-      const elemento = document.createElement("div");
+      const p = el("div", "parqueo nodato");
+      p.id = "p" + (i + 1);
 
-      elemento.id = "p" + (i + 1);
-      elemento.className = "parqueo";
-      elemento.textContent = "P" + (i + 1);
+      p.appendChild(el("span", "num", "P" + (i + 1)));
 
-      const grupo = i < 4 ? "filaA" : "filaB";
-      document.getElementById(grupo)
-              .appendChild(elemento);
+      const est = el("span", "est");
+      est.appendChild(el("span", "punto"));
+      est.appendChild(el("span", "", "Sin datos"));
+      p.appendChild(est);
+
+      document.getElementById(i < 4 ? "filaA" : "filaB")
+              .appendChild(p);
+
+      document.getElementById("barra")
+              .appendChild(document.createElement("span"));
+    }
+
+    // Aplicar estado visual a un parqueo.
+    function pintar(i, estado) {
+      const p = document.getElementById("p" + (i + 1));
+      const punto = p.querySelector(".punto");
+      const txt = p.querySelector(".est span:last-child");
+      const seg = document.getElementById("barra").children[i];
+
+      p.className = "parqueo";
+      punto.className = "punto";
+      seg.className = "";
+
+      if (estado === 0) {
+        p.classList.add("libre");
+        punto.classList.add("libre");
+        seg.className = "libre";
+        txt.textContent = "Disponible";
+      } else if (estado === 1) {
+        p.classList.add("ocupado");
+        punto.classList.add("ocup");
+        seg.className = "ocupado";
+        txt.textContent = "Ocupado";
+      } else {
+        p.classList.add("nodato");
+        txt.textContent = "Sin datos";
+      }
+    }
+
+    function hora() {
+      return new Date().toLocaleTimeString("es-GT", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      });
+    }
+
+    function registrar(i, estado) {
+      const lista = document.getElementById("eventos");
+      const vacio = document.getElementById("vacio");
+      if (vacio) vacio.remove();
+
+      const li = el("li");
+      const t = el("span", "nuevo",
+        "P" + (i + 1) + " \u2014 " +
+        (estado === 0 ? "Disponible" : "Ocupado"));
+      li.appendChild(t);
+      li.appendChild(el("span", "hora", hora()));
+
+      lista.prepend(li);
+
+      // El primer elemento deja de resaltarse al llegar otro.
+      const previo = lista.children[1];
+      if (previo) {
+        const s = previo.querySelector(".nuevo");
+        if (s) s.classList.remove("nuevo");
+      }
+
+      // Limitar historial del navegador.
+      while (lista.children.length > 30) {
+        lista.lastChild.remove();
+      }
+    }
+
+    function comunicacion(idTxt, idPunto, ok) {
+      document.getElementById(idTxt).textContent =
+        ok ? "Comunicaci\u00f3n OK" : "Sin comunicaci\u00f3n";
+      document.getElementById(idPunto).className =
+        ok ? "punto on" : "punto";
     }
 
     // Consultar los datos del ESP32.
@@ -196,44 +554,22 @@ const char PAGINA[] PROGMEM = R"rawliteral(
 
         document.getElementById("conexion")
                 .textContent = "ESP32 conectado";
+        document.getElementById("puntoConexion")
+                .className = "punto on";
 
-        document.getElementById("grupoA")
-                .textContent = datos.ok[0]
-                ? "Comunicacion OK"
-                : "Sin comunicacion";
-
-        document.getElementById("grupoB")
-                .textContent = datos.ok[1]
-                ? "Comunicacion OK"
-                : "Sin comunicacion";
+        comunicacion("grupoA", "puntoA", datos.ok[0]);
+        comunicacion("grupoB", "puntoB", datos.ok[1]);
 
         let disponibles = 0;
         let desconocidos = 0;
 
         for (let i = 0; i < 8; i++) {
           const estado = datos.slots[i];
-          const elemento =
-            document.getElementById("p" + (i + 1));
 
-          let texto = "Sin datos";
-          elemento.className = "parqueo";
+          if (estado === 0) disponibles++;
+          else if (estado !== 1) desconocidos++;
 
-          if (estado === 0) {
-            texto = "Disponible";
-            elemento.classList.add("libre");
-            disponibles++;
-          }
-          else if (estado === 1) {
-            texto = "Ocupado";
-            elemento.classList.add("ocupado");
-          }
-          else {
-            desconocidos++;
-          }
-
-          elemento.innerHTML =
-            "<b>P" + (i + 1) + "</b><p>" +
-            texto + "</p>";
+          pintar(i, estado);
 
           // Registrar solamente cambios entre
           // dos estados conocidos y distintos.
@@ -241,22 +577,7 @@ const char PAGINA[] PROGMEM = R"rawliteral(
               anteriores[i] !== -1 &&
               estado !== -1 &&
               anteriores[i] !== estado) {
-
-            const evento =
-              document.createElement("li");
-
-            evento.textContent =
-              "P" + (i + 1) + ": " + texto;
-
-            const lista =
-              document.getElementById("eventos");
-
-            lista.prepend(evento);
-
-            // Limitar historial del navegador.
-            while (lista.children.length > 30) {
-              lista.lastChild.remove();
-            }
+            registrar(i, estado);
           }
 
           anteriores[i] = estado;
@@ -269,23 +590,21 @@ const char PAGINA[] PROGMEM = R"rawliteral(
 
       } catch (error) {
         document.getElementById("conexion")
-                .textContent =
-                "Sin conexion con el ESP32";
-
+                .textContent = "Sin conexi\u00f3n con el ESP32";
+        document.getElementById("puntoConexion")
+                .className = "punto";
         document.getElementById("disponibles")
                 .textContent = "--";
+
+        comunicacion("grupoA", "puntoA", false);
+        comunicacion("grupoB", "puntoB", false);
 
         // No conservar estados como si fueran
         // datos actuales tras perder conexion.
         anteriores.fill(null);
 
         for (let i = 0; i < 8; i++) {
-          const elemento =
-            document.getElementById("p" + (i + 1));
-
-          elemento.className = "parqueo";
-          elemento.textContent =
-            "P" + (i + 1) + ": Sin datos";
+          pintar(i, -1);
         }
       }
     }
@@ -325,6 +644,34 @@ bool leerSTM32(uint8_t direccion, uint8_t &dato) {
   }
 
   return false;
+}
+// Mascara de informacion enviada a las STM32.
+bool construirMascaraGlobal(uint8_t &mascara)
+{
+    if (!grupoOk[0] || !grupoOk[1])
+        return false;
+
+    mascara = 0;
+
+    for (uint8_t i = 0; i < 8; i++)
+    {
+        if (estadoParqueos[i] < 0)
+            return false;
+
+        if (estadoParqueos[i] == 1)
+            mascara |= (1U << i);
+    }
+
+    return true;
+}
+
+bool enviarMascaraGlobal(uint8_t direccion, uint8_t mascara)
+{
+    Wire.beginTransmission(direccion);
+    Wire.write((uint8_t)0xA0);
+    Wire.write(mascara);
+
+    return Wire.endTransmission() == 0;
 }
 
 /*
@@ -531,17 +878,29 @@ void setup() {
 // 8. BUCLE PRINCIPAL
 // ==================================================
 
-void loop() {
+void loop()
+{
+    // Atender solicitudes del servidor web
+    server.handleClient();
 
-  // Atender solicitudes HTTP.
-  server.handleClient();
+    // Consultar I2C cada 500 ms
+    uint32_t ahora = millis();
 
-  // Consultar I2C sin usar delay().
-  uint32_t ahora = millis();
+    if (ahora - ultimaLecturaI2C >= INTERVALO_I2C_MS)
+    {
+        ultimaLecturaI2C = ahora;
 
-  if (ahora - ultimaLecturaI2C >= INTERVALO_I2C_MS) {
+        // Leer las dos STM32
+        actualizarSensores();
 
-    ultimaLecturaI2C = ahora;
-    actualizarSensores();
-  }
+        // Construir mascara global de 8 bits
+        uint8_t mascaraGlobal;
+
+        if (construirMascaraGlobal(mascaraGlobal))
+        {
+            // Enviar comando 0xA0 + mascara global
+            enviarMascaraGlobal(DIR_STM32_A, mascaraGlobal);
+            enviarMascaraGlobal(DIR_STM32_B, mascaraGlobal);
+        }
+    }
 }
