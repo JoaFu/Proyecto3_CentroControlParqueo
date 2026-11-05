@@ -48,8 +48,8 @@ typedef struct
 #define MUESTRAS_PROMEDIO          8U
 #define ADC_TIMEOUT_MS            5U
 #define ADC_MAXIMO                4095U
-#define LUZ_PARA_LIBERAR_PCT       60U
-#define LUZ_PARA_OCUPAR_PCT        40U
+#define LUZ_PARA_LIBERAR_PCT       40U
+#define LUZ_PARA_OCUPAR_PCT        20U
 #define I2C_DIRECCION_7BIT          0x10U
 /* USER CODE END PD */
 
@@ -75,7 +75,6 @@ volatile uint32_t errores_adc;
 /* Main publica un byte atomico; la ISR conserva su propia copia estable. */
 static volatile uint8_t ocupacion_publicada;
 static uint8_t i2c_tx;
-static uint8_t i2c_rx_descartado[2]; /* Segundo byte: margen del driver F4 en error. */
 static volatile uint8_t i2c_recuperar;
 volatile uint32_t i2c_ultimo_error;
 volatile uint32_t i2c_errores;
@@ -97,6 +96,11 @@ static const uint8_t tabla_7segmentos[9] =
 {
     0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F
 };
+
+static volatile uint8_t mascara_global_recibida;
+static volatile uint8_t mascara_global_valida;
+static uint8_t i2c_rx_global[2];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -104,8 +108,11 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_I2C1_Init(void);
+
+
 /* USER CODE BEGIN PFP */
 static void Parqueos_Init(void);
+static void Parqueos_ActualizarTotalGlobal(void);
 static void I2C_Servicio(void);
 static void I2C_PedirRecuperacion(void);
 static void Parqueos_ProcesarLdr(void);
@@ -115,6 +122,7 @@ static HAL_StatusTypeDef ADC_LeerLdr(uint16_t valores[]);
 static void Display_MostrarNumero(uint8_t numero);
 static void Display_EscribirSegmento(GPIO_TypeDef *puerto, uint16_t pin,
                                     uint8_t encender);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -281,24 +289,20 @@ static void Parqueos_ActualizarFSM(void)
 
 static void Parqueos_CalcularDisponibles(void)
 {
-    uint8_t ocupados = 0U;
     uint8_t mascara = 0U;
-    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
+
+    for (uint32_t sensor = 0U;
+         sensor < NUM_PARQUEOS_LOCALES;
+         ++sensor)
     {
         if (parqueos[sensor].estado == ESTADO_OCUPADO)
         {
-            ++ocupados;
             mascara |= (uint8_t)(1U << sensor);
         }
     }
-    ocupacion_publicada = mascara; /* Una sola escritura, despues de toda la FSM. */
-    /* PROVISIONAL: supone libres los cuatro del grupo B; no es total global. */
-    uint8_t nuevo_total = NUM_PARQUEOS_TOTALES - ocupados;
-    if (nuevo_total != espacios_disponibles)
-    {
-        espacios_disponibles = nuevo_total;
-        actualizar_display = 1U;
-    }
+
+    // Mantener la publicación local para el ESP32.
+    ocupacion_publicada = mascara;
 }
 
 static void Display_EscribirSegmento(
@@ -364,6 +368,29 @@ static void Display_MostrarNumero(uint8_t numero)
         GPIOC, GPIO_PIN_2, (patron >> 6) & 0x01U
     );
 }
+
+static void Parqueos_ActualizarTotalGlobal(void)
+{
+    if (mascara_global_valida == 0U)
+        return;
+
+    uint8_t mascara = mascara_global_recibida;
+    uint8_t ocupados = 0U;
+
+    for (uint8_t i = 0U; i < 8U; ++i)
+    {
+        ocupados += (mascara >> i) & 1U;
+    }
+
+    uint8_t disponibles = 8U - ocupados;
+
+    if (disponibles != espacios_disponibles)
+    {
+        espacios_disponibles = disponibles;
+        actualizar_display = 1U;
+    }
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -418,6 +445,7 @@ int main(void)
     I2C_Servicio();
     Parqueos_ProcesarLdr();
     Parqueos_ActualizarFSM();
+    Parqueos_ActualizarTotalGlobal();
     if (actualizar_display != 0U)
     {
         Display_MostrarNumero(espacios_disponibles);
@@ -697,27 +725,57 @@ static void I2C_Servicio(void)
 }
 
 void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c,
-                          uint8_t TransferDirection, uint16_t AddrMatchCode)
+                          uint8_t TransferDirection,
+                          uint16_t AddrMatchCode)
 {
     (void)AddrMatchCode;
-    if (hi2c->Instance != I2C1 || i2c_recuperar != 0U) { return; }
+
+    if (hi2c->Instance != I2C1 || i2c_recuperar != 0U)
+        return;
+
     HAL_StatusTypeDef resultado;
-    /* RECEIVE describe al MAESTRO: requestFrom lee, el esclavo transmite. */
+
     if (TransferDirection == I2C_DIRECTION_RECEIVE)
     {
+        // ESP32 solicita la ocupacion local P1-P4
         i2c_tx = ocupacion_publicada;
+
         resultado = HAL_I2C_Slave_Seq_Transmit_IT(
-            hi2c, &i2c_tx, 1U, I2C_FIRST_AND_LAST_FRAME);
-        if (resultado == HAL_OK) { ++i2c_lecturas; }
+            hi2c,
+            &i2c_tx,
+            1U,
+            I2C_FIRST_AND_LAST_FRAME
+        );
+
+        if (resultado == HAL_OK)
+            ++i2c_lecturas;
     }
     else
     {
-        /* Tolerar una escritura de un byte, descartandola. No es total global.
-         * Un escaneo con STOP sin datos puede provocar AF y recuperacion. */
+        // ESP32 envia comando 0xA0 + mascara global
         resultado = HAL_I2C_Slave_Seq_Receive_IT(
-            hi2c, i2c_rx_descartado, 1U, I2C_FIRST_AND_LAST_FRAME);
+            hi2c,
+            i2c_rx_global,
+            2U,
+            I2C_FIRST_AND_LAST_FRAME
+        );
     }
-    if (resultado != HAL_OK) { I2C_PedirRecuperacion(); }
+
+    if (resultado != HAL_OK)
+        I2C_PedirRecuperacion();
+}
+
+void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c->Instance != I2C1)
+        return;
+
+    // Validar identificador de sincronizacion
+    if (i2c_rx_global[0] == 0xA0)
+    {
+        mascara_global_recibida = i2c_rx_global[1];
+        mascara_global_valida = 1U;
+    }
 }
 
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c)
