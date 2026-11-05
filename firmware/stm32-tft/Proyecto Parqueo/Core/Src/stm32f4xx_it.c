@@ -57,6 +57,7 @@
 /* External variables --------------------------------------------------------*/
 extern DMA_HandleTypeDef hdma_tim2_ch1;
 /* USER CODE BEGIN EV */
+extern I2C_HandleTypeDef hi2c1;
 
 /* USER CODE END EV */
 
@@ -213,5 +214,15 @@ void DMA1_Stream5_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+void I2C1_EV_IRQHandler(void)
+{
+    HAL_I2C_EV_IRQHandler(&hi2c1);
+}
+
+void I2C1_ER_IRQHandler(void)
+{
+    HAL_I2C_ER_IRQHandler(&hi2c1);
+}
+
 
 /* USER CODE END 1 */
