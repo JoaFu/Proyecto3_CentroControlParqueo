@@ -61,7 +61,7 @@ extern "C" {
  * https://www.st.com/resource/en/reference_manual/rm0390-stm32f446xx-advanced-armbased-32bit-mcus-stmicroelectronics.pdf
  * https://github.com/STMicroelectronics/stm32f4xx-hal-driver/blob/master/Src/stm32f4xx_hal_tim.c
  */
-#define NEOPIXEL_COUNT 2U
+#define NEOPIXEL_COUNT 4U
 
 #if (NEOPIXEL_COUNT < 1U) || (NEOPIXEL_COUNT > 4U)
 #error "NEOPIXEL_COUNT debe estar entre 1 y 4"

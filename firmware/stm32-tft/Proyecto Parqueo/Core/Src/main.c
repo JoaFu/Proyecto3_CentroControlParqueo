@@ -61,8 +61,10 @@ typedef struct
 #define MUESTRAS_PROMEDIO          8U
 #define ADC_TIMEOUT_MS            5U
 #define ADC_MAXIMO                4095U
-#define LUZ_PARA_LIBERAR_PCT       30U
-#define LUZ_PARA_OCUPAR_PCT        20U
+#define I2C_COMANDO_GLOBAL        0xA0U
+#define GLOBAL_CADUCIDAD_MS       2000U
+#define LUZ_PARA_LIBERAR_PCT       40U
+#define LUZ_PARA_OCUPAR_PCT        30U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -110,13 +112,23 @@ static const ConfiguracionLdr_t configuracion_ldr[NUM_PARQUEOS_LOCALES] =
  */
 static volatile uint8_t ocupacion_publicada;
 static uint8_t i2c_tx;
-static uint8_t i2c_rx_descartado[2]; /* Margen defensivo del driver F4. */
+/* Dos bytes de protocolo; tercero solo como margen defensivo HAL F4. */
+static uint8_t i2c_rx_global[3];
+static uint8_t i2c_rx_global_activa;
+/* ISR publica estos tres campos; main toma una copia coherente breve. */
+static volatile uint8_t mascara_global_recibida;
+static volatile uint8_t mascara_global_valida;
+static volatile uint32_t ultima_mascara_ms;
+/* Caducidad solo diagnostica; no se inventan nuevos estados ni avisos TFT. */
+volatile uint8_t mascara_global_caducada = 1U;
+static uint8_t mascara_global_dibujada;
+static uint8_t mascara_global_inicializada;
 static volatile uint8_t i2c_recuperar;
 static volatile uint32_t i2c_ultimo_error;
 static volatile uint32_t i2c_errores;
 static uint32_t i2c_ultimo_intento;
-static uint8_t ocupacion_valida;
-static uint8_t ocupacion_dibujada;
+static uint8_t neopixels_inicializados;
+static uint8_t ocupacion_neopixels;
 
 /* USER CODE END PV */
 
@@ -139,6 +151,7 @@ static void Parqueos_ActualizarFSM(void);
 static void Parqueos_CalcularDisponibles(void);
 static void I2C_Escuchar(void);
 static void I2C_Servicio(void);
+static void TFT_ServicioGlobal(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -312,8 +325,8 @@ static void Parqueos_CalcularDisponibles(void)
             mascara |= (uint8_t)(1U << sensor);
         }
     }
-    /* Una sola mascara para I2C, TFT y NeoPixels, despues de toda la FSM.
-     * Actualizar_carros recibe 5..8; numero de disponibles SOLO local. */
+    /* Publicacion local para I2C y NeoPixels, despues de toda la FSM.
+     * La TFT se actualiza exclusivamente desde la mascara global del ESP. */
     Parqueo_PublicarConfirmados(mascara);
 }
 
@@ -360,7 +373,7 @@ int main(void)
     I2C_Escuchar();
 	LCD_Init();
 	LCD_Bitmap(0, 0, 320, 240, fondo);
-	LCD_Print("Local", 260, 50, 1, 0xffffff, 0x0000);
+	LCD_Print("Global", 260, 50, 1, 0xffffff, 0x0000);
 	LCD_Print("Disp. :", 260, 70, 1, 0xffffff, 0x0000);
 //	FillRect(0, 0, 319, 206, 0x421b);
 
@@ -372,6 +385,8 @@ int main(void)
      * Las lecturas siguientes confirman la ocupacion con 150 ms de filtro. */
     Parqueos_Init();
     Parqueos_CalcularDisponibles();
+    /* No mostrar 0..8 como medicion global hasta recibir el primer A0. */
+    LCD_Print("--", 280, 100, 1, 0xffffff, 0x0000);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -380,6 +395,7 @@ int main(void)
         I2C_Servicio();
         Parqueos_ProcesarLdr();
         Parqueos_ActualizarFSM();
+        TFT_ServicioGlobal();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -753,28 +769,58 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-/* Llamar SOLO desde main, despues de procesar la FSM de los cuatro sensores.
- * No llamar con muestras crudas o estados simulados. */
+/* Solo desde main: conservar independientes sensores y NeoPixels locales.
+ * La mascara global nunca sobrescribe ocupacion_publicada. */
 void Parqueo_PublicarConfirmados(uint8_t mascara)
 {
     uint8_t nueva = mascara & 0x0FU;
-    uint8_t anterior = ocupacion_dibujada;
-    uint16_t libres = 0U;
-    ocupacion_publicada = nueva; /* Escritura atomica de un byte. */
+    uint8_t anterior = ocupacion_neopixels;
+    ocupacion_publicada = nueva;
     for (uint32_t i = 0U; i < 4U; ++i) {
-        uint8_t ocupado = (nueva >> i) & 1U;
-        libres += (uint16_t)(1U - ocupado);
-        if (!ocupacion_valida || ((anterior ^ nueva) & (1U << i))) {
-            Actualizar_carros((uint16_t)(5U + i), (uint16_t)(1U - ocupado));
-            /* Mantener el controlador existente: rojo ocupado, verde libre. */
-            (void)neopixel((int)i, ocupado ? 255 : 0, ocupado ? 0 : 255, 0);
+        if (!neopixels_inicializados || ((anterior ^ nueva) & (1U << i))) {
+            uint8_t ocupado = (nueva >> i) & 1U;
+            (void)neopixel((int)i, ocupado ? 180 : 0, ocupado ? 0 : 180, 0);
         }
     }
-    if (!ocupacion_valida || anterior != nueva) {
-        Actualizar_numero(libres); /* SOLO disponibles locales, de 0 a 4. */
+    ocupacion_neopixels = nueva;
+    neopixels_inicializados = 1U;
+}
+
+static void TFT_ServicioGlobal(void)
+{
+    uint8_t mascara;
+    uint8_t valida;
+    uint32_t instante;
+    /* Solo copiar datos compartidos: nunca dibujar con IRQ deshabilitadas.
+     * Restaurar PRIMASK conserva el estado previo y evita mezclar paquetes. */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    mascara = mascara_global_recibida;
+    valida = mascara_global_valida;
+    instante = ultima_mascara_ms;
+    __set_PRIMASK(primask);
+
+    mascara_global_caducada = (uint8_t)(!valida ||
+        (uint32_t)(HAL_GetTick() - instante) >= GLOBAL_CADUCIDAD_MS);
+    if (!valida) { return; }
+    if (mascara_global_inicializada && mascara == mascara_global_dibujada) {
+        return;
     }
-    ocupacion_dibujada = nueva;
-    ocupacion_valida = 1U;
+    uint8_t cambios = mascara_global_inicializada
+                    ? (uint8_t)(mascara ^ mascara_global_dibujada) : 0xFFU;
+    uint16_t disponibles = 0U;
+    for (uint32_t i = 0U; i < 8U; ++i) {
+        uint8_t ocupado = (mascara >> i) & 1U;
+        disponibles += (uint16_t)(1U - ocupado);
+        if ((cambios & (1U << i)) != 0U) {
+            Actualizar_carros((uint16_t)(i + 1U), (uint16_t)(1U - ocupado));
+        }
+    }
+    Actualizar_numero(disponibles);
+    mascara_global_dibujada = mascara;
+    mascara_global_inicializada = 1U;
+    /* Ante caducidad se conserva la ultima imagen. Indicacion visual de
+     * perdida de comunicacion pendiente de definir, segun especificacion. */
 }
 
 static void I2C_Escuchar(void)
@@ -789,26 +835,49 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c,
 {
     HAL_StatusTypeDef resultado;
     (void)AddrMatchCode;
-    if (hi2c->Instance != I2C1) { return; }
+    if (hi2c->Instance != I2C1 || i2c_recuperar) { return; }
+    i2c_rx_global_activa = 0U;
     if (TransferDirection == I2C_DIRECTION_RECEIVE) {
         i2c_tx = ocupacion_publicada & 0x0FU; /* Buffer estable hasta STOP. */
         resultado = HAL_I2C_Slave_Seq_Transmit_IT(hi2c, &i2c_tx, 1U,
                                                I2C_FIRST_AND_LAST_FRAME);
     } else {
-        resultado = HAL_I2C_Slave_Seq_Receive_IT(hi2c, i2c_rx_descartado, 1U,
+        i2c_rx_global[0] = 0U;
+        i2c_rx_global[1] = 0U;
+        i2c_rx_global_activa = 1U;
+        resultado = HAL_I2C_Slave_Seq_Receive_IT(hi2c, i2c_rx_global, 2U,
                                               I2C_FIRST_AND_LAST_FRAME);
     }
-    if (resultado != HAL_OK) { i2c_recuperar = 1U; }
+    if (resultado != HAL_OK) {
+        i2c_rx_global_activa = 0U;
+        i2c_recuperar = 1U;
+    }
+}
+
+void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c->Instance != I2C1 || i2c_recuperar || !i2c_rx_global_activa) {
+        return;
+    }
+    i2c_rx_global_activa = 0U;
+    /* No publicar paquetes truncados ni identificadores desconocidos. */
+    if (hi2c->XferCount == 0U && i2c_rx_global[0] == I2C_COMANDO_GLOBAL) {
+        mascara_global_recibida = i2c_rx_global[1];
+        ultima_mascara_ms = HAL_GetTick();
+        mascara_global_valida = 1U;
+    }
 }
 
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c)
 {
+    if (hi2c->Instance == I2C1) { i2c_rx_global_activa = 0U; }
     if (hi2c->Instance == I2C1 && !i2c_recuperar) { I2C_Escuchar(); }
 }
 
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
 {
     if (hi2c->Instance != I2C1) { return; }
+    i2c_rx_global_activa = 0U;
     i2c_ultimo_error = HAL_I2C_GetError(hi2c);
     /* El NACK final normal de una lectura de 1 byte lo gestiona HAL.
      * Si HAL llega a este callback (incluso AF), recuperar fuera de ISR. */
@@ -827,6 +896,7 @@ static void I2C_Servicio(void)
      * No generar pulsos de bus: tambien esta conectada STM32 #1. */
     HAL_NVIC_DisableIRQ(I2C1_EV_IRQn);
     HAL_NVIC_DisableIRQ(I2C1_ER_IRQn);
+    i2c_rx_global_activa = 0U;
     (void)HAL_I2C_DeInit(&hi2c1);
     __HAL_RCC_I2C1_FORCE_RESET();
     __HAL_RCC_I2C1_RELEASE_RESET();
