@@ -10,6 +10,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdint.h>
+#include "neopixel.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,8 +49,8 @@ typedef struct
 #define MUESTRAS_PROMEDIO          8U
 #define ADC_TIMEOUT_MS            5U
 #define ADC_MAXIMO                4095U
-#define LUZ_PARA_LIBERAR_PCT       40U
-#define LUZ_PARA_OCUPAR_PCT        20U
+#define LUZ_PARA_LIBERAR_PCT       60U
+#define LUZ_PARA_OCUPAR_PCT        40U
 #define I2C_DIRECCION_7BIT          0x10U
 /* USER CODE END PD */
 
@@ -62,7 +63,14 @@ ADC_HandleTypeDef hadc1;
 
 I2C_HandleTypeDef hi2c1;
 
+TIM_HandleTypeDef htim2;
+DMA_HandleTypeDef hdma_tim2_ch1;
+
 /* USER CODE BEGIN PV */
+static uint8_t neopixels_inicializados;
+static uint8_t ocupacion_neopixels;
+static uint32_t neopixels_ultimo_intento;
+volatile uint32_t neopixels_errores;
 static Parqueo_t parqueos[NUM_PARQUEOS_LOCALES];
 static uint8_t espacios_disponibles = NUM_PARQUEOS_TOTALES;
 static uint8_t actualizar_display = 1U;
@@ -99,7 +107,7 @@ static const uint8_t tabla_7segmentos[9] =
 
 static volatile uint8_t mascara_global_recibida;
 static volatile uint8_t mascara_global_valida;
-static uint8_t i2c_rx_global[2];
+static uint8_t i2c_rx_global[3];
 
 /* USER CODE END PV */
 
@@ -110,7 +118,11 @@ static void MX_ADC1_Init(void);
 static void MX_I2C1_Init(void);
 
 
+static void MX_DMA_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+static void Neopixels_Servicio(void);
 static void Parqueos_Init(void);
 static void Parqueos_ActualizarTotalGlobal(void);
 static void I2C_Servicio(void);
@@ -391,7 +403,92 @@ static void Parqueos_ActualizarTotalGlobal(void)
     }
 }
 
+/* Una sola trama para los cuatro LEDs, desde el mismo byte que lee ESP32.
+ * Confirmar el envio solo cuando DMA termina; reintentar fallos en 50 ms. */
+static void Neopixels_Servicio(void)
+{
+    uint8_t mascara = ocupacion_publicada & 0x0FU;
+    uint32_t ahora = HAL_GetTick();
+    if (neopixels_inicializados && mascara == ocupacion_neopixels) { return; }
+    if ((uint32_t)(ahora - neopixels_ultimo_intento) < 50U) { return; }
+    neopixels_ultimo_intento = ahora;
+    if (neopixel_ocupacion(mascara) == HAL_OK) {
+        ocupacion_neopixels = mascara;
+        neopixels_inicializados = 1U;
+    } else {
+        ++neopixels_errores;
+    }
+}
 /* USER CODE END 0 */
+
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 0;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 104; /* 84 MHz / 105 = 800 kHz */
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+  HAL_TIM_MspPostInit(&htim2);
+
+}
+
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+
+}
+
+
 
 /**
   * @brief  The application entry point.
@@ -423,10 +520,15 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
+  MX_DMA_Init();
+  MX_TIM2_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   HAL_NVIC_DisableIRQ(EXTI3_IRQn);
   Parqueos_Init();
+  Parqueos_CalcularDisponibles();
+  neopixels_ultimo_intento = HAL_GetTick() - 50U;
+  Neopixels_Servicio();
   Display_MostrarNumero(espacios_disponibles);
   actualizar_display = 0U;
   if (HAL_I2C_EnableListen_IT(&hi2c1) != HAL_OK)
@@ -445,6 +547,7 @@ int main(void)
     I2C_Servicio();
     Parqueos_ProcesarLdr();
     Parqueos_ActualizarFSM();
+    Neopixels_Servicio();
     Parqueos_ActualizarTotalGlobal();
     if (actualizar_display != 0U)
     {
@@ -528,7 +631,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ScanConvMode = ENABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.DiscontinuousConvMode = ENABLE;
-  hadc1.Init.NbrOfDiscConversion = 1;
+  hadc1.Init.NbrOfDiscConversion = 1U;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
@@ -542,7 +645,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Channel = ADC_CHANNEL_0; /* LDR 1: PA0 */
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
@@ -552,7 +655,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Channel = ADC_CHANNEL_1; /* LDR 2: PA1 */
   sConfig.Rank = 2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -561,7 +664,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_4;
+  sConfig.Channel = ADC_CHANNEL_13; /* LDR 3: PC3 */
   sConfig.Rank = 3;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -570,14 +673,14 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_8;
+  sConfig.Channel = ADC_CHANNEL_14; /* LDR 4: PC4 */
   sConfig.Rank = 4;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-
+  /* Secuencia PA0, PA1, PC3, PC4: un rank por disparo, sin DMA. */
   /* USER CODE END ADC1_Init 2 */
 
 }
@@ -771,7 +874,7 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
         return;
 
     // Validar identificador de sincronizacion
-    if (i2c_rx_global[0] == 0xA0)
+    if (!i2c_recuperar && hi2c->XferCount == 0U && i2c_rx_global[0] == 0xA0)
     {
         mascara_global_recibida = i2c_rx_global[1];
         mascara_global_valida = 1U;

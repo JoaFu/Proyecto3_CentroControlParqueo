@@ -240,6 +240,13 @@ void I2C1_ER_IRQHandler(void)
   /* USER CODE END I2C1_ER_IRQn 1 */
 }
 
+extern DMA_HandleTypeDef hdma_tim2_ch1;
+void DMA1_Stream5_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_tim2_ch1);
+}
+
+
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
