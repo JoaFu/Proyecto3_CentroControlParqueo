@@ -63,8 +63,8 @@ typedef struct
 #define ADC_MAXIMO                4095U
 #define I2C_COMANDO_GLOBAL        0xA0U
 #define GLOBAL_CADUCIDAD_MS       2000U
-#define LUZ_PARA_LIBERAR_PCT       40U
-#define LUZ_PARA_OCUPAR_PCT        30U
+#define LUZ_PARA_LIBERAR_PCT       60U
+#define LUZ_PARA_OCUPAR_PCT        40U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -387,6 +387,7 @@ int main(void)
     Parqueos_CalcularDisponibles();
     /* No mostrar 0..8 como medicion global hasta recibir el primer A0. */
     LCD_Print("--", 280, 100, 1, 0xffffff, 0x0000);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -396,6 +397,7 @@ int main(void)
         Parqueos_ProcesarLdr();
         Parqueos_ActualizarFSM();
         TFT_ServicioGlobal();
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -475,9 +477,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.Resolution = ADC_RESOLUTION_12B;
   hadc1.Init.ScanConvMode = ENABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
-  /* Un disparo por rank, como requiere ADC_LeerLdr(). */
-  hadc1.Init.DiscontinuousConvMode = ENABLE;
-  hadc1.Init.NbrOfDiscConversion = 1;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
@@ -491,7 +491,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_1; /* PA1: parqueo 5 */
+  sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
@@ -501,7 +501,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_10; /* PC0: parqueo 6 */
+  sConfig.Channel = ADC_CHANNEL_10;
   sConfig.Rank = 2;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -510,7 +510,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_12; /* PC2: parqueo 7 */
+  sConfig.Channel = ADC_CHANNEL_12;
   sConfig.Rank = 3;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -519,7 +519,7 @@ static void MX_ADC1_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_13; /* PC3: parqueo 8 */
+  sConfig.Channel = ADC_CHANNEL_13;
   sConfig.Rank = 4;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
@@ -549,7 +549,7 @@ static void MX_I2C1_Init(void)
   hi2c1.Instance = I2C1;
   hi2c1.Init.ClockSpeed = 100000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = (0x11U << 1); /* HAL F4: 0x22 */
+  hi2c1.Init.OwnAddress1 = 34;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c1.Init.OwnAddress2 = 0;
@@ -625,7 +625,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 99;
+  htim2.Init.Period = 104;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)

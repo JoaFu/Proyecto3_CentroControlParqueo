@@ -58,7 +58,7 @@ HAL_StatusTypeDef neopixel(int Pixel, int R, int G, int B)
         return HAL_ERROR;
     }
     if ((htim2.Instance->PSC != 0U) ||
-        (htim2.Instance->ARR != 99U))
+        (htim2.Instance->ARR != 104U))
     {
         return HAL_ERROR;
     }
