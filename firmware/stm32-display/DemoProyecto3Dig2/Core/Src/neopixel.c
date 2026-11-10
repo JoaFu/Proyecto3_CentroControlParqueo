@@ -2,21 +2,29 @@
 
 extern TIM_HandleTypeDef htim2;
 
-/* 84 MHz / 105 = 800 kHz. T0H=405 ns, T1H=798 ns.
+/* Version funcional compartida por Wicho, adaptada a PA15.
+ * 84 MHz / 105 = 800 kHz. T0H=381 ns, T1H=762 ns.
  * 260 periodos a nivel bajo = 325 us de reset antes y despues.
  * Los ceros finales tambien cubren la precarga del registro CCR1.
  */
 #define NP_RESET_SLOTS 260U
 #define NP_DATA_SLOTS  (24U * NEOPIXEL_COUNT)
 #define NP_FRAME_SLOTS (2U * NP_RESET_SLOTS + NP_DATA_SLOTS)
-#define NP_T0H         34U
-#define NP_T1H         67U
+#define NP_T0H         32U
+#define NP_T1H         64U
 #define NP_TIMEOUT_MS  20U
 
 static uint8_t colors[NEOPIXEL_COUNT][3]; /* GRB */
 static uint32_t pwm[NP_FRAME_SLOTS];       /* DMA: Word -> Word */
 static volatile uint8_t transfer_done;
 static uint8_t busy;
+
+static uint8_t clamp_color(int value)
+{
+    if (value < 0) { return 0U; }
+    if (value > 255) { return 255U; }
+    return (uint8_t)value;
+}
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
 {
@@ -30,12 +38,16 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
     }
 }
 
-HAL_StatusTypeDef neopixel_ocupacion(uint8_t mascara)
+HAL_StatusTypeDef neopixel(int Pixel, int R, int G, int B)
 {
     HAL_StatusTypeDef status;
     uint32_t started;
     uint32_t index = NP_RESET_SLOTS;
 
+    if ((Pixel < 0) || ((uint32_t)Pixel >= NEOPIXEL_COUNT))
+    {
+        return HAL_ERROR;
+    }
     if ((__get_IPSR() != 0U) || (__get_PRIMASK() != 0U))
     {
         return HAL_ERROR;
@@ -52,12 +64,9 @@ HAL_StatusTypeDef neopixel_ocupacion(uint8_t mascara)
         return HAL_ERROR;
     }
     busy = 1U;
-    for (uint32_t pixel = 0U; pixel < NEOPIXEL_COUNT; ++pixel) {
-        uint8_t ocupado = (mascara >> pixel) & 1U;
-        colors[pixel][0] = ocupado ? 0U : NEOPIXEL_BRIGHTNESS;
-        colors[pixel][1] = ocupado ? NEOPIXEL_BRIGHTNESS : 0U;
-        colors[pixel][2] = 0U;
-    }
+    colors[Pixel][0] = clamp_color(G);
+    colors[Pixel][1] = clamp_color(R);
+    colors[Pixel][2] = clamp_color(B);
     /* Los extremos del buffer estatico permanecen a cero. */
     for (uint32_t pixel = 0U; pixel < NEOPIXEL_COUNT; ++pixel)
     {
