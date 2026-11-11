@@ -2,11 +2,6 @@
 
 extern TIM_HandleTypeDef htim2;
 
-/* Version funcional compartida por Wicho, adaptada a PA15.
- * 84 MHz / 105 = 800 kHz. T0H=381 ns, T1H=762 ns.
- * 260 periodos a nivel bajo = 325 us de reset antes y despues.
- * Los ceros finales tambien cubren la precarga del registro CCR1.
- */
 #define NP_RESET_SLOTS 260U
 #define NP_DATA_SLOTS  (24U * NEOPIXEL_COUNT)
 #define NP_FRAME_SLOTS (2U * NP_RESET_SLOTS + NP_DATA_SLOTS)
@@ -31,7 +26,7 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
     if ((htim == &htim2) &&
         (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1))
     {
-        /* El buffer ya lleva mas de 320 us de nivel bajo al terminar.
+        /* El buffer ya lleva maás de 320us de nivel bajo al terminar.
          * El bucle principal detiene el timer; CCR1 permanece en cero.
          */
         transfer_done = 1U;
