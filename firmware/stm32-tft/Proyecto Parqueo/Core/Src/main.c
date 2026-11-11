@@ -93,10 +93,6 @@ volatile uint16_t lecturas_ldr[NUM_PARQUEOS_LOCALES];
 volatile uint8_t luminosidad_pct[NUM_PARQUEOS_LOCALES];
 volatile uint8_t lectura_adc_valida;
 volatile uint32_t errores_adc;
-/* Divisor: 3.3 V -> resistencia fija -> ADC -> LDR -> GND.
- * Referencias iniciales de escala completa, no mediciones calibradas.
- * Ajustar adc_con_luz/adc_sin_luz por sensor con las lecturas reales.
- * Con el divisor invertido, intercambiar las dos referencias. */
 static const ConfiguracionLdr_t configuracion_ldr[NUM_PARQUEOS_LOCALES] =
 {
     {0U, ADC_MAXIMO, LUZ_PARA_LIBERAR_PCT, LUZ_PARA_OCUPAR_PCT},
@@ -106,20 +102,13 @@ static const ConfiguracionLdr_t configuracion_ldr[NUM_PARQUEOS_LOCALES] =
 };
 
 
-/* STM32 #2: unicamente bits 0..3 = parqueos 5..8.
- * Cero inicial sigue el estado DISPONIBLE de arranque de la FSM original.
- * El protocolo existente no tiene indicador de validez.
- */
 static volatile uint8_t ocupacion_publicada;
 static uint8_t i2c_tx;
-/* Dos bytes de protocolo; tercero solo como margen defensivo HAL F4. */
 static uint8_t i2c_rx_global[3];
 static uint8_t i2c_rx_global_activa;
-/* ISR publica estos tres campos; main toma una copia coherente breve. */
 static volatile uint8_t mascara_global_recibida;
 static volatile uint8_t mascara_global_valida;
 static volatile uint32_t ultima_mascara_ms;
-/* Caducidad solo diagnostica; no se inventan nuevos estados ni avisos TFT. */
 volatile uint8_t mascara_global_caducada = 1U;
 static uint8_t mascara_global_dibujada;
 static uint8_t mascara_global_inicializada;
@@ -157,178 +146,7 @@ static void TFT_ServicioGlobal(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-static void Parqueos_Init(void)
-{
-    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
-    {
-        parqueos[sensor].estado = ESTADO_DISPONIBLE;
-        parqueos[sensor].flag_ocupado = 0U;
-        parqueos[sensor].cambio_pendiente = 0U;
-        const ConfiguracionLdr_t *config = &configuracion_ldr[sensor];
-        if (config->adc_con_luz == config->adc_sin_luz ||
-            config->adc_con_luz > ADC_MAXIMO ||
-            config->adc_sin_luz > ADC_MAXIMO ||
-            config->luz_para_liberar_pct > 100U ||
-            config->luz_para_ocupar_pct >= config->luz_para_liberar_pct)
-        {
-            Error_Handler();
-        }
-    }
-    ultima_lectura_ms = HAL_GetTick() - PERIODO_LECTURA_MS;
-}
 
-static HAL_StatusTypeDef ADC_LeerLdr(uint16_t valores[])
-{
-    uint32_t sumas[NUM_PARQUEOS_LOCALES] = {0};
-    HAL_StatusTypeDef resultado = HAL_OK;
-
-    /* Un disparo por rank; detener solo al terminar la secuencia completa. */
-    for (uint32_t muestra = 0U; muestra <= MUESTRAS_PROMEDIO; ++muestra)
-    {
-        for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
-        {
-            resultado = HAL_ADC_Start(&hadc1);
-            if (resultado != HAL_OK) { goto finalizar; }
-            if (HAL_ADC_GetError(&hadc1) != HAL_ADC_ERROR_NONE)
-            {
-                resultado = HAL_ERROR;
-                goto finalizar;
-            }
-            resultado = HAL_ADC_PollForConversion(&hadc1, ADC_TIMEOUT_MS);
-            if (resultado != HAL_OK) { goto finalizar; }
-            if (__HAL_ADC_GET_FLAG(&hadc1, ADC_FLAG_OVR) != RESET)
-            {
-                resultado = HAL_ERROR;
-                goto finalizar;
-            }
-            uint32_t lectura = HAL_ADC_GetValue(&hadc1);
-            if (lectura > ADC_MAXIMO)
-            {
-                resultado = HAL_ERROR;
-                goto finalizar;
-            }
-            if (muestra != 0U) { sumas[sensor] += lectura; }
-        }
-        if (HAL_ADC_Stop(&hadc1) != HAL_OK ||
-            (hadc1.Instance->CR2 & ADC_CR2_ADON) != 0U)
-        {
-            Error_Handler();
-        }
-    }
-    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
-    {
-        valores[sensor] = (uint16_t)((sumas[sensor] + MUESTRAS_PROMEDIO / 2U)
-                                    / MUESTRAS_PROMEDIO);
-    }
-    return HAL_OK;
-
-finalizar:
-    if (HAL_ADC_Stop(&hadc1) != HAL_OK ||
-        (hadc1.Instance->CR2 & ADC_CR2_ADON) != 0U)
-    {
-        Error_Handler();
-    }
-    return resultado;
-}
-
-static void Parqueos_ProcesarLdr(void)
-{
-    uint32_t ahora = HAL_GetTick();
-    if ((uint32_t)(ahora - ultima_lectura_ms) < PERIODO_LECTURA_MS) { return; }
-    ultima_lectura_ms = ahora;
-    uint16_t valores[NUM_PARQUEOS_LOCALES];
-
-    if (ADC_LeerLdr(valores) != HAL_OK)
-    {
-        lectura_adc_valida = 0U;
-        if (errores_adc < UINT32_MAX) { ++errores_adc; }
-        for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
-        {
-            parqueos[sensor].cambio_pendiente = 0U;
-        }
-        return; /* Conservar el ultimo numero y reintentar la lectura. */
-    }
-    lectura_adc_valida = 1U;
-    ahora = HAL_GetTick();
-
-    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
-    {
-        const ConfiguracionLdr_t *config = &configuracion_ldr[sensor];
-        Parqueo_t *parqueo = &parqueos[sensor];
-        lecturas_ldr[sensor] = valores[sensor];
-        int32_t luz = (100 * ((int32_t)valores[sensor] - config->adc_sin_luz))
-                    / ((int32_t)config->adc_con_luz - config->adc_sin_luz);
-        if (luz < 0) { luz = 0; }
-        if (luz > 100) { luz = 100; }
-        luminosidad_pct[sensor] = (uint8_t)luz;
-
-        uint8_t ocupado;
-        if (luz >= config->luz_para_liberar_pct) { ocupado = 0U; }
-        else if (luz <= config->luz_para_ocupar_pct) { ocupado = 1U; }
-        else
-        {
-            parqueo->cambio_pendiente = 0U;
-            continue;
-        }
-
-        if (ocupado == parqueo->flag_ocupado)
-        {
-            parqueo->cambio_pendiente = 0U;
-        }
-        else if (parqueo->cambio_pendiente == 0U ||
-                 ocupado != parqueo->candidato_ocupado)
-        {
-            parqueo->candidato_ocupado = ocupado;
-            parqueo->inicio_cambio_ms = ahora;
-            parqueo->cambio_pendiente = 1U;
-        }
-        else if ((uint32_t)(ahora - parqueo->inicio_cambio_ms)
-                 >= CONFIRMACION_CAMBIO_MS)
-        {
-            parqueo->flag_ocupado = ocupado;
-            parqueo->cambio_pendiente = 0U;
-        }
-    }
-}
-
-static void Parqueos_ActualizarFSM(void)
-{
-    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
-    {
-        Parqueo_t *parqueo = &parqueos[sensor];
-        switch (parqueo->estado)
-        {
-            case ESTADO_DISPONIBLE:
-                if (parqueo->flag_ocupado != 0U)
-                    parqueo->estado = ESTADO_OCUPADO;
-                break;
-            case ESTADO_OCUPADO:
-                if (parqueo->flag_ocupado == 0U)
-                    parqueo->estado = ESTADO_DISPONIBLE;
-                break;
-            default:
-                parqueo->estado = parqueo->flag_ocupado != 0U
-                                ? ESTADO_OCUPADO : ESTADO_DISPONIBLE;
-                break;
-        }
-    }
-    Parqueos_CalcularDisponibles();
-}
-
-static void Parqueos_CalcularDisponibles(void)
-{
-    uint8_t mascara = 0U;
-    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
-    {
-        if (parqueos[sensor].estado == ESTADO_OCUPADO)
-        {
-            mascara |= (uint8_t)(1U << sensor);
-        }
-    }
-    /* Publicacion local para I2C y NeoPixels, despues de toda la FSM.
-     * La TFT se actualiza exclusivamente desde la mascara global del ESP. */
-    Parqueo_PublicarConfirmados(mascara);
-}
 
 
 
@@ -953,6 +771,176 @@ void Actualizar_carros(uint16_t espacio, uint16_t disponible)
 
 void Actualizar_numero(uint16_t parqueos){
 	LCD_Sprite(280,100,16,16,numeros,9,parqueos,0,0);
+}
+
+static void Parqueos_Init(void)
+{
+    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
+    {
+        parqueos[sensor].estado = ESTADO_DISPONIBLE;
+        parqueos[sensor].flag_ocupado = 0U;
+        parqueos[sensor].cambio_pendiente = 0U;
+        const ConfiguracionLdr_t *config = &configuracion_ldr[sensor];
+        if (config->adc_con_luz == config->adc_sin_luz ||
+            config->adc_con_luz > ADC_MAXIMO ||
+            config->adc_sin_luz > ADC_MAXIMO ||
+            config->luz_para_liberar_pct > 100U ||
+            config->luz_para_ocupar_pct >= config->luz_para_liberar_pct)
+        {
+            Error_Handler();
+        }
+    }
+    ultima_lectura_ms = HAL_GetTick() - PERIODO_LECTURA_MS;
+}
+
+static HAL_StatusTypeDef ADC_LeerLdr(uint16_t valores[])
+{
+    uint32_t sumas[NUM_PARQUEOS_LOCALES] = {0};
+    HAL_StatusTypeDef resultado = HAL_OK;
+
+    for (uint32_t muestra = 0U; muestra <= MUESTRAS_PROMEDIO; ++muestra)
+    {
+        for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
+        {
+            resultado = HAL_ADC_Start(&hadc1);
+            if (resultado != HAL_OK) { goto finalizar; }
+            if (HAL_ADC_GetError(&hadc1) != HAL_ADC_ERROR_NONE)
+            {
+                resultado = HAL_ERROR;
+                goto finalizar;
+            }
+            resultado = HAL_ADC_PollForConversion(&hadc1, ADC_TIMEOUT_MS);
+            if (resultado != HAL_OK) { goto finalizar; }
+            if (__HAL_ADC_GET_FLAG(&hadc1, ADC_FLAG_OVR) != RESET)
+            {
+                resultado = HAL_ERROR;
+                goto finalizar;
+            }
+            uint32_t lectura = HAL_ADC_GetValue(&hadc1);
+            if (lectura > ADC_MAXIMO)
+            {
+                resultado = HAL_ERROR;
+                goto finalizar;
+            }
+            if (muestra != 0U) { sumas[sensor] += lectura; }
+        }
+        if (HAL_ADC_Stop(&hadc1) != HAL_OK ||
+            (hadc1.Instance->CR2 & ADC_CR2_ADON) != 0U)
+        {
+            Error_Handler();
+        }
+    }
+    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
+    {
+        valores[sensor] = (uint16_t)((sumas[sensor] + MUESTRAS_PROMEDIO / 2U)
+                                    / MUESTRAS_PROMEDIO);
+    }
+    return HAL_OK;
+
+finalizar:
+    if (HAL_ADC_Stop(&hadc1) != HAL_OK ||
+        (hadc1.Instance->CR2 & ADC_CR2_ADON) != 0U)
+    {
+        Error_Handler();
+    }
+    return resultado;
+}
+
+static void Parqueos_ProcesarLdr(void)
+{
+    uint32_t ahora = HAL_GetTick();
+    if ((uint32_t)(ahora - ultima_lectura_ms) < PERIODO_LECTURA_MS) { return; }
+    ultima_lectura_ms = ahora;
+    uint16_t valores[NUM_PARQUEOS_LOCALES];
+
+    if (ADC_LeerLdr(valores) != HAL_OK)
+    {
+        lectura_adc_valida = 0U;
+        if (errores_adc < UINT32_MAX) { ++errores_adc; }
+        for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
+        {
+            parqueos[sensor].cambio_pendiente = 0U;
+        }
+        return; /* Conservar el ultimo numero y reintentar la lectura. */
+    }
+    lectura_adc_valida = 1U;
+    ahora = HAL_GetTick();
+
+    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
+    {
+        const ConfiguracionLdr_t *config = &configuracion_ldr[sensor];
+        Parqueo_t *parqueo = &parqueos[sensor];
+        lecturas_ldr[sensor] = valores[sensor];
+        int32_t luz = (100 * ((int32_t)valores[sensor] - config->adc_sin_luz))
+                    / ((int32_t)config->adc_con_luz - config->adc_sin_luz);
+        if (luz < 0) { luz = 0; }
+        if (luz > 100) { luz = 100; }
+        luminosidad_pct[sensor] = (uint8_t)luz;
+
+        uint8_t ocupado;
+        if (luz >= config->luz_para_liberar_pct) { ocupado = 0U; }
+        else if (luz <= config->luz_para_ocupar_pct) { ocupado = 1U; }
+        else
+        {
+            parqueo->cambio_pendiente = 0U;
+            continue;
+        }
+
+        if (ocupado == parqueo->flag_ocupado)
+        {
+            parqueo->cambio_pendiente = 0U;
+        }
+        else if (parqueo->cambio_pendiente == 0U ||
+                 ocupado != parqueo->candidato_ocupado)
+        {
+            parqueo->candidato_ocupado = ocupado;
+            parqueo->inicio_cambio_ms = ahora;
+            parqueo->cambio_pendiente = 1U;
+        }
+        else if ((uint32_t)(ahora - parqueo->inicio_cambio_ms)
+                 >= CONFIRMACION_CAMBIO_MS)
+        {
+            parqueo->flag_ocupado = ocupado;
+            parqueo->cambio_pendiente = 0U;
+        }
+    }
+}
+
+static void Parqueos_ActualizarFSM(void)
+{
+    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
+    {
+        Parqueo_t *parqueo = &parqueos[sensor];
+        switch (parqueo->estado)
+        {
+            case ESTADO_DISPONIBLE:
+                if (parqueo->flag_ocupado != 0U)
+                    parqueo->estado = ESTADO_OCUPADO;
+                break;
+            case ESTADO_OCUPADO:
+                if (parqueo->flag_ocupado == 0U)
+                    parqueo->estado = ESTADO_DISPONIBLE;
+                break;
+            default:
+                parqueo->estado = parqueo->flag_ocupado != 0U
+                                ? ESTADO_OCUPADO : ESTADO_DISPONIBLE;
+                break;
+        }
+    }
+    Parqueos_CalcularDisponibles();
+}
+
+static void Parqueos_CalcularDisponibles(void)
+{
+    uint8_t mascara = 0U;
+    for (uint32_t sensor = 0U; sensor < NUM_PARQUEOS_LOCALES; ++sensor)
+    {
+        if (parqueos[sensor].estado == ESTADO_OCUPADO)
+        {
+            mascara |= (uint8_t)(1U << sensor);
+        }
+    }
+    Parqueo_PublicarConfirmados(mascara);
 }
 
 /* USER CODE END 4 */
