@@ -403,8 +403,8 @@ static void Parqueos_ActualizarTotalGlobal(void)
     }
 }
 
-/* Una sola trama para los cuatro LEDs, desde el mismo byte que lee ESP32.
- * Confirmar el envio solo cuando DMA termina; reintentar fallos en 50 ms. */
+/* Misma actualizacion por pixel que Wicho, desde el byte que lee ESP32.
+ * No confirmar el grupo si falla algun envio; reintentar en 50 ms. */
 static void Neopixels_Servicio(void)
 {
     uint8_t mascara = ocupacion_publicada & 0x0FU;
@@ -412,12 +412,23 @@ static void Neopixels_Servicio(void)
     if (neopixels_inicializados && mascara == ocupacion_neopixels) { return; }
     if ((uint32_t)(ahora - neopixels_ultimo_intento) < 50U) { return; }
     neopixels_ultimo_intento = ahora;
-    if (neopixel_ocupacion(mascara) == HAL_OK) {
-        ocupacion_neopixels = mascara;
-        neopixels_inicializados = 1U;
-    } else {
-        ++neopixels_errores;
+    for (uint32_t i = 0U; i < NEOPIXEL_COUNT; ++i) {
+        if (!neopixels_inicializados ||
+            ((ocupacion_neopixels ^ mascara) & (1U << i))) {
+            uint8_t ocupado = (mascara >> i) & 1U;
+            if (neopixel((int)i,
+                         ocupado ? NEOPIXEL_BRIGHTNESS : 0,
+                         ocupado ? 0 : NEOPIXEL_BRIGHTNESS, 0) != HAL_OK) {
+                ++neopixels_errores;
+                /* Reenviar los cuatro: el buffer puede contener cambios
+                 * parciales aunque el estado local vuelva al anterior. */
+                neopixels_inicializados = 0U;
+                return;
+            }
+        }
     }
+    ocupacion_neopixels = mascara;
+    neopixels_inicializados = 1U;
 }
 /* USER CODE END 0 */
 
