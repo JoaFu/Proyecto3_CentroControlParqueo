@@ -49,10 +49,14 @@ extern "C" {
 
 /* USER CODE END EM */
 
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
+
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
+/* Solo desde main: bits 0..3 corresponden a parqueos 5..8. */
+void Parqueo_PublicarConfirmados(uint8_t mascara);
 
 /* USER CODE END EFP */
 

@@ -393,43 +393,77 @@ void LCD_BitmapTransparent(uint16_t x, uint16_t y, uint16_t width,
 //***************************************************************************************************************************************
 // Función para dibujar una imagen sprite - los parámetros columns = número de imagenes en el sprite, index = cual desplegar, flip = darle vuelta
 //***************************************************************************************************************************************
-void LCD_Sprite(int x, int y, int width, int height, const uint16_t *bitmap,
-		int columns, int index, char flip, char offset) {
-	//LCD_CMD(0x02c); // write_memory_start
-	//	HAL_GPIO_WritePin(LCD_DC_GPIO_Port, LCD_DC_Pin, GPIO_PIN_SET);
-	//	HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_RESET);
-	LCD_DC_H();
-	LCD_CS_L();
+void LCD_Sprite(
+    int x,
+    int y,
+    int width,
+    int height,
+    const uint16_t *bitmap,
+    int columns,
+    int index,
+    char flip,
+    char offset)
+{
+    int ancho = width * columns;
+    int k;
 
-	SetWindows(x, y, x + width - 1, y + height - 1);
+    // Evita seleccionar un frame inexistente
+    if (index < 0 || index >= columns)
+    {
+        return;
+    }
 
-	int ancho = width * columns;
-	int k = 0;
+    LCD_DC_H();
+    LCD_CS_L();
 
-	if (flip) {
-		for (int j = 0; j < height; j++) {
-			k = j * ancho + index * width - 1 - offset;
-			k = k + width;
-			for (int i = 0; i < width; i++) {
-				uint16_t pixel = bitmap[k];
-				LCD_DATA(pixel >> 8);
-				LCD_DATA(pixel & 0xFF);
-				k--;
-			}
-		}
-	} else {
-		for (int j = 0; j < height; j++) {
-			k = j * ancho + index * width + 1 + offset;
-			for (int i = 0; i < width; i++) {
-				uint16_t pixel = bitmap[k];
-				LCD_DATA(pixel >> 8);
-				LCD_DATA(pixel & 0xFF);
-				k++;
-			}
-		}
-	}
+    SetWindows(
+        x,
+        y,
+        x + width - 1,
+        y + height - 1
+    );
 
-	//HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET);
-	LCD_CS_H();
+    if (flip)
+    {
+        for (int j = 0; j < height; j++)
+        {
+            // Último píxel de la fila del frame seleccionado
+            k = j * ancho
+                + (index + 1) * width
+                - 1
+                - offset;
+
+            for (int i = 0; i < width; i++)
+            {
+                uint16_t pixel = bitmap[k];
+
+                LCD_DATA(pixel >> 8);
+                LCD_DATA(pixel & 0xFF);
+
+                k--;
+            }
+        }
+    }
+    else
+    {
+        for (int j = 0; j < height; j++)
+        {
+            // Primer píxel de la fila del frame seleccionado
+            k = j * ancho
+                + index * width
+                + offset;
+
+            for (int i = 0; i < width; i++)
+            {
+                uint16_t pixel = bitmap[k];
+
+                LCD_DATA(pixel >> 8);
+                LCD_DATA(pixel & 0xFF);
+
+                k++;
+            }
+        }
+    }
+
+    LCD_CS_H();
 }
-
